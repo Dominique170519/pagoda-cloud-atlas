@@ -1,69 +1,110 @@
-import { useRef, useMemo, useEffect, useState, useCallback, Suspense } from 'react';
+import { useRef, useMemo, useEffect, useState, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, useGLTF } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayerGroup, ViewMode } from '../../hooks/usePointCloud';
 
 /* ------------------------------------------------------------------ */
-/*  Rendered GLTF model layer                                          */
+/*  Rendered GLTF model — keep native materials untouched              */
 /* ------------------------------------------------------------------ */
 function PagodaModel({ url }: { url: string }) {
   const gltf = useGLTF(url);
-  const modelRef = useRef<THREE.Group>(null);
-
-  const material = useMemo(() => {
-    return new THREE.MeshPhongMaterial({
-      color: new THREE.Color('#C9A84E'),
-      specular: new THREE.Color('#1A1A20'),
-      shininess: 15,
-      flatShading: true,
-      transparent: false,
-      side: THREE.FrontSide,
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!modelRef.current) return;
-    modelRef.current.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        child.material = material;
-      }
-    });
-  }, [material]);
-
-  return <primitive ref={modelRef} object={gltf.scene.clone()} scale={0.9} />;
+  return <primitive object={gltf.scene.clone()} scale={0.9} />;
 }
 
 /* ------------------------------------------------------------------ */
-/*  Scan-line glow                                                     */
+/*  Scan-line glow — softer double-line effect                         */
 /* ------------------------------------------------------------------ */
 function ScanLine({ x, visible }: { x: number; visible: boolean }) {
   const meshRef = useRef<THREE.Mesh>(null);
+  const glowRef = useRef<THREE.Mesh>(null);
 
   useFrame(() => {
     if (meshRef.current) {
       meshRef.current.visible = visible;
       meshRef.current.position.x = x;
     }
+    if (glowRef.current) {
+      glowRef.current.visible = visible;
+      glowRef.current.position.x = x;
+    }
   });
 
   return (
-    <mesh ref={meshRef} visible={visible}>
-      <planeGeometry args={[0.012, 3.5]} />
-      <meshBasicMaterial
-        color="#00D4FF"
-        transparent
-        opacity={0.8}
-        blending={THREE.AdditiveBlending}
-        depthWrite={false}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
+    <group>
+      {/* Core line */}
+      <mesh ref={meshRef} visible={visible}>
+        <planeGeometry args={[0.008, 3.2]} />
+        <meshBasicMaterial
+          color="#00D4FF"
+          transparent
+          opacity={0.9}
+          depthWrite={false}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+      {/* Glow fuzz */}
+      <mesh ref={glowRef} visible={visible}>
+        <planeGeometry args={[0.08, 3.2]} />
+        <meshBasicMaterial
+          color="#00D4FF"
+          transparent
+          opacity={0.18}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+    </group>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*  PointCloud with clipping support                                   */
+/*  Custom point shader — fade near wipe boundary                      */
+/* ------------------------------------------------------------------ */
+
+const vertexShader = /* glsl */ `
+  attribute float size;
+  attribute vec3 color;
+  varying vec3 vColor;
+  varying float vWorldX;
+  uniform float uSize;
+
+  void main() {
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = uSize * (300.0 / -mvPosition.z);
+    gl_Position = projectionMatrix * mvPosition;
+    vColor = color;
+    vWorldX = position.x;
+  }
+`;
+
+const fragmentShader = /* glsl */ `
+  varying vec3 vColor;
+  varying float vWorldX;
+  uniform float uWipeX;
+  uniform float uWipeActive;
+  uniform float uFadeWidth;
+
+  void main() {
+    // Circular point shape
+    float d = length(gl_PointCoord - 0.5) * 2.0;
+    if (d > 1.0) discard;
+    float circleAlpha = 1.0 - smoothstep(0.85, 1.0, d);
+
+    // Wipe transition zone
+    float wipeAlpha = 1.0;
+    if (uWipeActive > 0.5) {
+      wipeAlpha = smoothstep(-uFadeWidth, uFadeWidth, vWorldX - uWipeX);
+    }
+
+    float alpha = circleAlpha * wipeAlpha * 0.78;
+    gl_FragColor = vec4(vColor, alpha);
+  }
+`;
+
+/* ------------------------------------------------------------------ */
+/*  PointCloud with custom shader fade                                 */
 /* ------------------------------------------------------------------ */
 interface PointCloudRendererProps {
   vertices: Float32Array;
@@ -81,22 +122,20 @@ function PointCloudRenderer({
   isExploded,
   layers,
   viewMode,
-  wipeProgress: wipeProgressProp,
+  wipeProgress: targetWipe,
   wipeActive,
   glbUrl,
-  onWipeChange,
 }: PointCloudRendererProps) {
   const pointsRef = useRef<THREE.Points>(null);
   const groupRef = useRef<THREE.Group>(null);
   const [explosionProgress, setExplosionProgress] = useState(0);
   const targetExplosion = useRef(0);
-  const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0));
   const { gl } = useThree();
 
-  // Enable local clipping
-  useEffect(() => {
-    gl.localClippingEnabled = true;
-  }, [gl]);
+  // Smooth wipe display — lerps to target with inertia
+  const smoothWipe = useRef(0.5);
+  const smoothWipeX = useRef(0);
+  const wipeVelocity = useRef(0);
 
   // Create merged geometry
   const geometry = useMemo(() => {
@@ -128,36 +167,64 @@ function PointCloudRenderer({
     return arr;
   }, [vertices, layers]);
 
-  const colorAttr = useMemo(() => {
-    return new THREE.BufferAttribute(colors, 3);
-  }, [colors]);
+  // Build shader material
+  const shaderMaterial = useMemo(() => {
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        uSize: { value: 0.008 },
+        uWipeX: { value: 0 },
+        uWipeActive: { value: 0 },
+        uFadeWidth: { value: 0.18 },
+      },
+      vertexShader,
+      fragmentShader,
+      transparent: true,
+      depthWrite: true,
+    });
+  }, []);
 
-  // Update point material clipping plane based on wipeProgress
   useEffect(() => {
-    const mat = pointsRef.current?.material;
-    if (!(mat instanceof THREE.PointsMaterial)) return;
+    return () => {
+      shaderMaterial.dispose();
+    };
+  }, [shaderMaterial]);
+
+  // Update point size based on view mode
+  useFrame((_, delta) => {
+    if (pointsRef.current) {
+      const mat = pointsRef.current.material as THREE.ShaderMaterial;
+      const targetSize = viewMode === 'cloud' ? 0.008 : 0.005;
+      mat.uniforms.uSize.value += (targetSize - mat.uniforms.uSize.value) * 0.12;
+    }
+
+    // Smooth wipe animation with spring-damper
+    const targetWipeX_mapped = (targetWipe - 0.5) * 4;
+    const dx = targetWipeX_mapped - smoothWipeX.current;
+    const stiffness = 8;
+    const damping = 0.75;
+    wipeVelocity.current += dx * stiffness * delta;
+    wipeVelocity.current *= Math.pow(damping, 60 * delta);
+    smoothWipeX.current += wipeVelocity.current * delta;
 
     if (wipeActive) {
-      // wipeProgress: 0 = all point cloud, 1 = all model
-      // Clipping plane clips points where they are on the "wrong" side
-      // Plane at x position mapped from wipeProgress: [-2, 2]
-      const clipX = (wipeProgressProp - 0.5) * 4; // maps 0→-2, 0.5→0, 1→2
-      clipPlaneRef.current.set(new THREE.Vector3(-1, 0, 0), clipX);
-      mat.clippingPlanes = [clipPlaneRef.current];
-      mat.clipShadows = true;
-      mat.needsUpdate = true;
-    } else {
-      mat.clippingPlanes = [];
-      mat.clipShadows = false;
-      mat.needsUpdate = true;
+      smoothWipe.current = smoothWipeX.current / 4 + 0.5; // map back to [0,1]
     }
-  }, [wipeActive, wipeProgressProp]);
 
-  // Update target explosion smoothly
+    // Update shader uniforms
+    const sm = pointsRef.current?.material as THREE.ShaderMaterial | undefined;
+    if (sm?.uniforms) {
+      sm.uniforms.uWipeX.value = smoothWipeX.current;
+      sm.uniforms.uWipeActive.value = wipeActive ? 1.0 : 0.0;
+    }
+  });
+
+  // Update target explosion
   useEffect(() => {
     targetExplosion.current = isExploded ? 1 : 0;
   }, [isExploded]);
 
+  // Explosion animation in a second useFrame (we use multiple, all good)
+  const explosionFrame = useRef(0);
   useFrame((_, delta) => {
     if (!pointsRef.current) return;
 
@@ -165,9 +232,9 @@ function PointCloudRenderer({
     const target = targetExplosion.current;
     const speed = 2.5;
     const next = current + (target - current) * Math.min(speed * delta, 1);
+    explosionFrame.current = next;
     setExplosionProgress(next);
 
-    // Apply explosion: deform positions
     if (target > 0.01 || next > 0.01) {
       const pos = pointsRef.current.geometry.attributes.position;
       const orig = geometry.attributes.position;
@@ -205,7 +272,6 @@ function PointCloudRenderer({
       }
       pointsRef.current.geometry.attributes.position.needsUpdate = true;
     } else if (current > 0 && next <= 0.01) {
-      // Snap back: copy original positions exactly
       const pos = pointsRef.current.geometry.attributes.position;
       const orig = geometry.attributes.position;
       for (let i = 0; i < orig.count; i++) {
@@ -213,32 +279,18 @@ function PointCloudRenderer({
       }
       pointsRef.current.geometry.attributes.position.needsUpdate = true;
     }
-
-    // Point size based on view mode
-    if (pointsRef.current && pointsRef.current.material instanceof THREE.PointsMaterial) {
-      const mat = pointsRef.current.material;
-      const targetSize = viewMode === 'cloud' ? 0.008 : 0.005;
-      mat.size += (targetSize - mat.size) * 0.15;
-    }
   });
-
-  // Update geometry color on viewMode change
-  useEffect(() => {
-    if (pointsRef.current) {
-      pointsRef.current.geometry.setAttribute('color', colorAttr);
-    }
-  }, [colorAttr]);
 
   return (
     <group ref={groupRef}>
-      {/* Rendered 3D model (underneath) */}
+      {/* Rendered 3D model (underneath) — keeps native textures */}
       {glbUrl && (
         <Suspense fallback={null}>
           <PagodaModel url={glbUrl} />
         </Suspense>
       )}
 
-      {/* Point cloud overlay */}
+      {/* Point cloud with custom fade shader */}
       <points ref={pointsRef}>
         <bufferGeometry>
           <bufferAttribute
@@ -247,27 +299,20 @@ function PointCloudRenderer({
           />
           <bufferAttribute
             attach="attributes-color"
-            {...colorAttr}
+            array={colors}
+            itemSize={3}
           />
         </bufferGeometry>
-        <pointsMaterial
-          size={0.008}
-          vertexColors
-          transparent
-          opacity={0.7}
-          depthWrite
-          sizeAttenuation
-          clippingPlanes={[]}
-        />
+        <primitive object={shaderMaterial} attach="material" />
       </points>
 
       {/* Scan line at wipe boundary */}
       <ScanLine
-        x={(wipeProgressProp - 0.5) * 4}
+        x={smoothWipeX.current}
         visible={wipeActive}
       />
 
-      {/* Grid helper */}
+      {/* Grid */}
       <gridHelper
         args={[4, 20, '#1A1A24', '#0D0D14']}
         position={[0, -1.3, 0]}
@@ -277,19 +322,26 @@ function PointCloudRenderer({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Wipe drag handler                                                  */
+/*  Wipe drag handler — sets target, not position                      */
 /* ------------------------------------------------------------------ */
 function WipeHandler({
   active,
+  currentProgress,
   onProgress,
 }: {
   active: boolean;
+  currentProgress: number;
   onProgress: (p: number) => void;
 }) {
   const { size } = useThree();
   const dragging = useRef(false);
-  const startProgress = useRef(0);
+  const startProgress = useRef(0.5);
   const startX = useRef(0);
+
+  // Keep startProgress in sync
+  useEffect(() => {
+    startProgress.current = currentProgress;
+  }, [currentProgress]);
 
   useEffect(() => {
     const canvas = document.querySelector('canvas');
@@ -299,21 +351,21 @@ function WipeHandler({
       if (!active) return;
       dragging.current = true;
       startX.current = e.clientX;
-      startProgress.current = 0.5; // Will be updated by the parent
       (e.target as HTMLElement).style.cursor = 'ew-resize';
     };
 
     const onMove = (e: MouseEvent) => {
       if (!active || !dragging.current) return;
       const dx = e.clientX - startX.current;
-      const progress = Math.max(0, Math.min(1, startProgress.current + dx / (size.width * 0.6)));
+      const progress = Math.max(0, Math.min(1, startProgress.current + dx / (size.width * 0.55)));
       onProgress(progress);
     };
 
     const onUp = () => {
       dragging.current = false;
       if (active) {
-        (document.querySelector('canvas') as HTMLElement)?.style.setProperty('cursor', 'ew-resize');
+        const c = document.querySelector('canvas') as HTMLElement;
+        if (c) c.style.cursor = 'ew-resize';
       }
     };
 
@@ -321,7 +373,6 @@ function WipeHandler({
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
 
-    // Set cursor
     if (active) {
       canvas.style.cursor = 'ew-resize';
     } else {
@@ -333,12 +384,7 @@ function WipeHandler({
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
-  }, [active, size.width, onProgress]);
-
-  // Keep startProgress in sync
-  useEffect(() => {
-    startProgress.current = 0.5;
-  }, [active]);
+  }, [active, size.width, onProgress, currentProgress]);
 
   return null;
 }
@@ -366,10 +412,10 @@ export default function PointCloudCanvas({
         gl.localClippingEnabled = true;
       }}
     >
-      <ambientLight intensity={0.55} />
-      <directionalLight position={[5, 8, 5]} intensity={1.2} />
-      <directionalLight position={[-5, 3, -5]} intensity={0.5} />
-      <directionalLight position={[0, -1, 3]} intensity={0.3} />
+      <ambientLight intensity={0.7} />
+      <directionalLight position={[5, 8, 5]} intensity={1.4} />
+      <directionalLight position={[-5, 3, -5]} intensity={0.6} />
+      <directionalLight position={[0, -1, 3]} intensity={0.35} />
 
       <PointCloudRenderer
         wipeProgress={wipeProgress}
@@ -381,6 +427,7 @@ export default function PointCloudCanvas({
 
       <WipeHandler
         active={wipeActive}
+        currentProgress={wipeProgress}
         onProgress={onWipeChange}
       />
 

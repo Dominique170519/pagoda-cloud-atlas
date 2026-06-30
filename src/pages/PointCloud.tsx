@@ -75,7 +75,7 @@ export default function PointCloud() {
             viewMode={state.viewMode}
             wipeActive={state.wipeActive}
             wipeProgress={state.wipeProgress}
-            glbUrl="/models/pagoda.glb"
+            glbUrl="/models/pagoda-textured.glb"
             onWipeChange={setWipeProgress}
           />
         )}
