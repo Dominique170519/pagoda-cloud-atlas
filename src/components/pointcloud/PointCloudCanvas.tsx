@@ -1,4 +1,4 @@
-import { useRef, useMemo, useEffect, useState, Suspense } from 'react';
+import { useRef, useMemo, useEffect, useState, useCallback, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, useGLTF } from '@react-three/drei';
 import * as THREE from 'three';
@@ -11,22 +11,25 @@ function PagodaModel({ url }: { url: string }) {
   const gltf = useGLTF(url);
   const modelRef = useRef<THREE.Group>(null);
 
-  useEffect(() => {
-    if (!modelRef.current) return;
-    // Traverse and set material
-    modelRef.current.traverse((child) => {
-      if (child instanceof THREE.Mesh && child.material) {
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-        materials.forEach((mat) => {
-          if (mat instanceof THREE.MeshStandardMaterial) {
-            mat.roughness = 0.85;
-            mat.metalness = 0.1;
-            mat.color.set('#2C2416');
-          }
-        });
-      }
+  const material = useMemo(() => {
+    return new THREE.MeshPhongMaterial({
+      color: new THREE.Color('#C9A84E'),
+      specular: new THREE.Color('#1A1A20'),
+      shininess: 15,
+      flatShading: true,
+      transparent: false,
+      side: THREE.FrontSide,
     });
   }, []);
+
+  useEffect(() => {
+    if (!modelRef.current) return;
+    modelRef.current.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.material = material;
+      }
+    });
+  }, [material]);
 
   return <primitive ref={modelRef} object={gltf.scene.clone()} scale={0.9} />;
 }
@@ -363,9 +366,10 @@ export default function PointCloudCanvas({
         gl.localClippingEnabled = true;
       }}
     >
-      <ambientLight intensity={0.3} />
-      <directionalLight position={[5, 5, 5]} intensity={0.4} />
-      <directionalLight position={[-3, 2, -3]} intensity={0.15} />
+      <ambientLight intensity={0.55} />
+      <directionalLight position={[5, 8, 5]} intensity={1.2} />
+      <directionalLight position={[-5, 3, -5]} intensity={0.5} />
+      <directionalLight position={[0, -1, 3]} intensity={0.3} />
 
       <PointCloudRenderer
         wipeProgress={wipeProgress}
