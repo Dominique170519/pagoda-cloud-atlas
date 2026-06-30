@@ -14,6 +14,8 @@ export interface PointCloudState {
   viewMode: ViewMode;
   activeTool: ToolMode;
   scanActive: boolean;
+  wipeActive: boolean;
+  wipeProgress: number;
   loading: boolean;
   error: string | null;
 }
@@ -27,6 +29,8 @@ const initialState: PointCloudState = {
   viewMode: 'cloud',
   activeTool: 'rotate',
   scanActive: false,
+  wipeActive: false,
+  wipeProgress: 0.5,
   loading: false,
   error: null,
 };
@@ -155,6 +159,18 @@ export function usePointCloud() {
     setState((s) => ({ ...s, scanActive: !s.scanActive }));
   }, []);
 
+  const toggleWipe = useCallback(() => {
+    setState((s) => ({
+      ...s,
+      wipeActive: !s.wipeActive,
+      activeTool: s.wipeActive ? 'rotate' : 'slice',
+    }));
+  }, []);
+
+  const setWipeProgress = useCallback((progress: number) => {
+    setState((s) => ({ ...s, wipeProgress: Math.max(0, Math.min(1, progress)) }));
+  }, []);
+
   const setNumLayers = useCallback((num: number) => {
     setState((s) => {
       if (originalVerticesRef.current) {
@@ -178,6 +194,8 @@ export function usePointCloud() {
     setActiveTool,
     toggleExplode,
     toggleScan,
+    toggleWipe,
+    setWipeProgress,
     setNumLayers,
     triggerRestore,
   };

@@ -1,15 +1,76 @@
-import { useRef, useMemo, useEffect, useState } from 'react';
+import { useRef, useMemo, useEffect, useState, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Line } from '@react-three/drei';
+import { OrbitControls, useGLTF } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayerGroup, ViewMode } from '../../hooks/usePointCloud';
 
+/* ------------------------------------------------------------------ */
+/*  Rendered GLTF model layer                                          */
+/* ------------------------------------------------------------------ */
+function PagodaModel({ url }: { url: string }) {
+  const gltf = useGLTF(url);
+  const modelRef = useRef<THREE.Group>(null);
+
+  useEffect(() => {
+    if (!modelRef.current) return;
+    // Traverse and set material
+    modelRef.current.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.material) {
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+        materials.forEach((mat) => {
+          if (mat instanceof THREE.MeshStandardMaterial) {
+            mat.roughness = 0.85;
+            mat.metalness = 0.1;
+            mat.color.set('#2C2416');
+          }
+        });
+      }
+    });
+  }, []);
+
+  return <primitive ref={modelRef} object={gltf.scene.clone()} scale={0.9} />;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Scan-line glow                                                     */
+/* ------------------------------------------------------------------ */
+function ScanLine({ x, visible }: { x: number; visible: boolean }) {
+  const meshRef = useRef<THREE.Mesh>(null);
+
+  useFrame(() => {
+    if (meshRef.current) {
+      meshRef.current.visible = visible;
+      meshRef.current.position.x = x;
+    }
+  });
+
+  return (
+    <mesh ref={meshRef} visible={visible}>
+      <planeGeometry args={[0.012, 3.5]} />
+      <meshBasicMaterial
+        color="#00D4FF"
+        transparent
+        opacity={0.8}
+        blending={THREE.AdditiveBlending}
+        depthWrite={false}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  PointCloud with clipping support                                   */
+/* ------------------------------------------------------------------ */
 interface PointCloudRendererProps {
   vertices: Float32Array;
   isExploded: boolean;
   layers: LayerGroup[];
   viewMode: ViewMode;
-  scanActive: boolean;
+  wipeProgress: number;
+  wipeActive: boolean;
+  glbUrl: string;
+  onWipeChange: (progress: number) => void;
 }
 
 function PointCloudRenderer({
@@ -17,14 +78,22 @@ function PointCloudRenderer({
   isExploded,
   layers,
   viewMode,
-  scanActive,
+  wipeProgress: wipeProgressProp,
+  wipeActive,
+  glbUrl,
+  onWipeChange,
 }: PointCloudRendererProps) {
   const pointsRef = useRef<THREE.Points>(null);
   const groupRef = useRef<THREE.Group>(null);
-  const scanLineRef = useRef<THREE.Mesh>(null);
   const [explosionProgress, setExplosionProgress] = useState(0);
   const targetExplosion = useRef(0);
-  const { camera } = useThree();
+  const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0));
+  const { gl } = useThree();
+
+  // Enable local clipping
+  useEffect(() => {
+    gl.localClippingEnabled = true;
+  }, [gl]);
 
   // Create merged geometry
   const geometry = useMemo(() => {
@@ -60,6 +129,27 @@ function PointCloudRenderer({
     return new THREE.BufferAttribute(colors, 3);
   }, [colors]);
 
+  // Update point material clipping plane based on wipeProgress
+  useEffect(() => {
+    const mat = pointsRef.current?.material;
+    if (!(mat instanceof THREE.PointsMaterial)) return;
+
+    if (wipeActive) {
+      // wipeProgress: 0 = all point cloud, 1 = all model
+      // Clipping plane clips points where they are on the "wrong" side
+      // Plane at x position mapped from wipeProgress: [-2, 2]
+      const clipX = (wipeProgressProp - 0.5) * 4; // maps 0→-2, 0.5→0, 1→2
+      clipPlaneRef.current.set(new THREE.Vector3(-1, 0, 0), clipX);
+      mat.clippingPlanes = [clipPlaneRef.current];
+      mat.clipShadows = true;
+      mat.needsUpdate = true;
+    } else {
+      mat.clippingPlanes = [];
+      mat.clipShadows = false;
+      mat.needsUpdate = true;
+    }
+  }, [wipeActive, wipeProgressProp]);
+
   // Update target explosion smoothly
   useEffect(() => {
     targetExplosion.current = isExploded ? 1 : 0;
@@ -85,7 +175,6 @@ function PointCloudRenderer({
         const oy = orig.getY(i);
         const oz = orig.getZ(i);
 
-        // Find which layer this vertex belongs to
         let layerIdx = 0;
         for (const layer of layers) {
           if (layer.vertexIndices.includes(i)) {
@@ -122,15 +211,6 @@ function PointCloudRenderer({
       pointsRef.current.geometry.attributes.position.needsUpdate = true;
     }
 
-    // Scan line animation
-    if (scanLineRef.current && scanActive) {
-      const t = (Date.now() * 0.001) % 2 / 2;
-      scanLineRef.current.position.y = -1.25 + t * 2.5;
-      scanLineRef.current.visible = true;
-    } else if (scanLineRef.current) {
-      scanLineRef.current.visible = false;
-    }
-
     // Point size based on view mode
     if (pointsRef.current && pointsRef.current.material instanceof THREE.PointsMaterial) {
       const mat = pointsRef.current.material;
@@ -148,6 +228,14 @@ function PointCloudRenderer({
 
   return (
     <group ref={groupRef}>
+      {/* Rendered 3D model (underneath) */}
+      {glbUrl && (
+        <Suspense fallback={null}>
+          <PagodaModel url={glbUrl} />
+        </Suspense>
+      )}
+
+      {/* Point cloud overlay */}
       <points ref={pointsRef}>
         <bufferGeometry>
           <bufferAttribute
@@ -166,21 +254,15 @@ function PointCloudRenderer({
           opacity={0.7}
           depthWrite
           sizeAttenuation
+          clippingPlanes={[]}
         />
       </points>
 
-      {/* Scan line */}
-      <mesh ref={scanLineRef} visible={false}>
-        <planeGeometry args={[4, 0.015]} />
-        <meshBasicMaterial
-          color="#00D4FF"
-          transparent
-          opacity={0.6}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-          side={THREE.DoubleSide}
-        />
-      </mesh>
+      {/* Scan line at wipe boundary */}
+      <ScanLine
+        x={(wipeProgressProp - 0.5) * 4}
+        visible={wipeActive}
+      />
 
       {/* Grid helper */}
       <gridHelper
@@ -191,26 +273,117 @@ function PointCloudRenderer({
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  Wipe drag handler                                                  */
+/* ------------------------------------------------------------------ */
+function WipeHandler({
+  active,
+  onProgress,
+}: {
+  active: boolean;
+  onProgress: (p: number) => void;
+}) {
+  const { size } = useThree();
+  const dragging = useRef(false);
+  const startProgress = useRef(0);
+  const startX = useRef(0);
+
+  useEffect(() => {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) return;
+
+    const onDown = (e: MouseEvent) => {
+      if (!active) return;
+      dragging.current = true;
+      startX.current = e.clientX;
+      startProgress.current = 0.5; // Will be updated by the parent
+      (e.target as HTMLElement).style.cursor = 'ew-resize';
+    };
+
+    const onMove = (e: MouseEvent) => {
+      if (!active || !dragging.current) return;
+      const dx = e.clientX - startX.current;
+      const progress = Math.max(0, Math.min(1, startProgress.current + dx / (size.width * 0.6)));
+      onProgress(progress);
+    };
+
+    const onUp = () => {
+      dragging.current = false;
+      if (active) {
+        (document.querySelector('canvas') as HTMLElement)?.style.setProperty('cursor', 'ew-resize');
+      }
+    };
+
+    canvas.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+
+    // Set cursor
+    if (active) {
+      canvas.style.cursor = 'ew-resize';
+    } else {
+      canvas.style.cursor = '';
+    }
+
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, [active, size.width, onProgress]);
+
+  // Keep startProgress in sync
+  useEffect(() => {
+    startProgress.current = 0.5;
+  }, [active]);
+
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Canvas wrapper                                                     */
+/* ------------------------------------------------------------------ */
 interface PointCloudCanvasProps extends PointCloudRendererProps {
   onToolSelect?: (tool: string) => void;
 }
 
-export default function PointCloudCanvas(props: PointCloudCanvasProps) {
+export default function PointCloudCanvas({
+  wipeProgress,
+  wipeActive,
+  glbUrl,
+  onWipeChange,
+  ...props
+}: PointCloudCanvasProps) {
   return (
     <Canvas
       camera={{ position: [0, 0.3, 4.5], fov: 45, near: 0.1, far: 20 }}
       gl={{ antialias: true, alpha: true }}
       style={{ background: '#08080C' }}
+      onCreated={({ gl }) => {
+        gl.localClippingEnabled = true;
+      }}
     >
-      <ambientLight intensity={0.1} />
-      <directionalLight position={[5, 5, 5]} intensity={0.15} />
+      <ambientLight intensity={0.3} />
+      <directionalLight position={[5, 5, 5]} intensity={0.4} />
+      <directionalLight position={[-3, 2, -3]} intensity={0.15} />
 
-      <PointCloudRenderer {...props} />
+      <PointCloudRenderer
+        wipeProgress={wipeProgress}
+        wipeActive={wipeActive}
+        glbUrl={glbUrl}
+        onWipeChange={onWipeChange}
+        {...props}
+      />
+
+      <WipeHandler
+        active={wipeActive}
+        onProgress={onWipeChange}
+      />
 
       <OrbitControls
         enablePan
         enableZoom
-        enableRotate
+        enableRotate={!wipeActive}
         minDistance={1.2}
         maxDistance={8}
         dampingFactor={0.08}

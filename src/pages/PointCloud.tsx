@@ -15,6 +15,8 @@ export default function PointCloud() {
     setActiveTool,
     toggleExplode,
     toggleScan,
+    toggleWipe,
+    setWipeProgress,
     setNumLayers,
     triggerRestore,
   } = usePointCloud();
@@ -71,7 +73,10 @@ export default function PointCloud() {
             isExploded={state.isExploded}
             layers={state.layers}
             viewMode={state.viewMode}
-            scanActive={state.scanActive}
+            wipeActive={state.wipeActive}
+            wipeProgress={state.wipeProgress}
+            glbUrl="/models/pagoda.glb"
+            onWipeChange={setWipeProgress}
           />
         )}
       </div>
@@ -108,12 +113,14 @@ export default function PointCloud() {
           activeTool={state.activeTool}
           onSelect={handleToolSelect}
           onScanToggle={toggleScan}
+          onWipeToggle={toggleWipe}
           isExploded={state.isExploded}
           scanActive={state.scanActive}
+          wipeActive={state.wipeActive}
         />
       </div>
 
-      {/* Right Bottom - Layer Selector */}
+      {/* Layer Selector - moved up since we removed scan button */}
       <div className="absolute right-6 bottom-8 z-10">
         <LayerSelector
           numLayers={state.numLayers}
@@ -143,20 +150,6 @@ export default function PointCloud() {
             </button>
           ))}
         </div>
-      </div>
-
-      {/* Right Bottom - Scan toggle */}
-      <div className="absolute right-6 bottom-52 z-10">
-        <button
-          onClick={toggleScan}
-          className={`text-[10px] font-mono tracking-wider px-3 py-1.5 rounded transition-all
-            ${state.scanActive
-              ? 'bg-cyan/10 text-cyan border border-cyan/20'
-              : 'text-ink-600 border border-ink-700 hover:text-ink-400'
-            }`}
-        >
-          SCAN {state.scanActive ? 'ON' : 'OFF'}
-        </button>
       </div>
     </div>
   );

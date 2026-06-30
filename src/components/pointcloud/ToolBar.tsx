@@ -4,8 +4,10 @@ interface ToolBarProps {
   activeTool: ToolMode;
   onSelect: (tool: ToolMode) => void;
   onScanToggle: () => void;
+  onWipeToggle: () => void;
   isExploded: boolean;
   scanActive: boolean;
+  wipeActive: boolean;
 }
 
 const tools: { id: ToolMode; label: string; icon: string }[] = [
@@ -63,10 +65,11 @@ function ToolIcon({ icon, active }: { icon: string; active: boolean }) {
 const modeHints: Record<string, string> = {
   measure: '点击两点\n测量距离',
   slice: '拖动平面\n剖切视图',
+  wipe: '拖拽切换\n点云↔模型',
 };
 
-export default function ToolBar({ activeTool, onSelect, onScanToggle, isExploded, scanActive }: ToolBarProps) {
-  const hint = modeHints[activeTool];
+export default function ToolBar({ activeTool, onSelect, onScanToggle, onWipeToggle, isExploded, scanActive, wipeActive }: ToolBarProps) {
+  const hint = wipeActive ? modeHints.wipe : modeHints[activeTool];
 
   return (
     <div className="glass-panel p-2 flex flex-col gap-1">
@@ -91,20 +94,21 @@ export default function ToolBar({ activeTool, onSelect, onScanToggle, isExploded
       {/* Separator */}
       <div className="border-t border-ink-600/30 my-1" />
 
-      {/* Scan button */}
+      {/* Scan / Wipe button */}
       <button
-        onClick={onScanToggle}
-        className={`tool-btn ${scanActive ? 'active' : ''}`}
-        title="扫描线"
+        onClick={onWipeToggle}
+        className={`tool-btn ${wipeActive ? 'active' : ''}`}
+        title="扫描切换"
       >
         <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none"
-          stroke={scanActive ? '#00D4FF' : '#777'} strokeWidth="1.2">
-          <line x1="4" y1="12" x2="20" y2="12" />
-          <rect x="7" y="4" width="10" height="3" rx="1" />
-          <rect x="7" y="17" width="10" height="3" rx="1" />
-          <line x1="12" y1="7" x2="12" y2="17" strokeDasharray="1.5,1.5" opacity="0.3" />
+          stroke={wipeActive ? '#00D4FF' : '#777'} strokeWidth="1.2">
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <line x1="12" y1="5" x2="12" y2="19" strokeWidth="1.5" />
+          <line x1="6" y1="12" x2="18" y2="12" strokeDasharray="2,1.5" opacity="0.4" />
+          <polyline points="9,8 12,5 15,8" opacity="0.6" />
+          <polyline points="9,16 12,19 15,16" opacity="0.6" />
         </svg>
-        <span className="text-[10px] leading-none">扫描</span>
+        <span className="text-[10px] leading-none">切换</span>
       </button>
 
       {/* Mode hint */}
